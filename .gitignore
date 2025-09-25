@@ -1,0 +1,33 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.env/
+.venv/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.spec
+
+# Logs
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor settings
+.vscode/
+.idea/
+
+# PyInstaller output
+*.exe
+*.dll
+*.so
+*.dylib
+*.app
