@@ -12,7 +12,7 @@ A simple Python application to download videos and audio from youtube sources.
 1. **Clone the repository**
 
 ```bash
-git clone https://github.com/<your-username>/Video-Downloader.git
+git clone https://github.com/Bharathsencha/Video-Downloader.git
 cd Video-Downloader
 ```
 
