@@ -45,6 +45,13 @@ def fetch_info(url: str) -> Dict:
         "quiet": True,
         "no_warnings": True,
         "extract_flat": False,  # get full metadata
+        # Anti-bot measures - use multiple clients as fallback
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["ios", "android", "web"],
+                "player_skip": ["configs"],
+            }
+        },
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -81,19 +88,23 @@ def estimate_file_size(height: int, duration: int, ext: str) -> str:
     if ext.lower() == "webm":
         bitrate = int(bitrate * 0.8)
     
-    # Calculate size in MB
-    size_mb = (bitrate * duration) / (8 * 1000)  # Convert kbps*seconds to MB
+    # Calculate size in MB - FIXED: Added audio bitrate estimation
+    # Video bitrate + estimated audio bitrate (128 kbps default)
+    audio_bitrate = 128
+    total_bitrate = bitrate + audio_bitrate
+    
+    size_mb = (total_bitrate * duration) / (8 * 1000)  # Convert kbps*seconds to MB
     
     if size_mb < 1024:
-        return f"Est. {size_mb:.0f}MB"
+        return f"~{size_mb:.0f}MB"
     else:
         size_gb = size_mb / 1024
-        return f"Est. {size_gb:.1f}GB"
+        return f"~{size_gb:.1f}GB"
 
 def parse_video_formats(info: Dict) -> List[Tuple[str, str]]:
     """
     Returns list of (format_id, label) with highest quality first, 144p last.
-    Label example: "1080p MP4 Est. 1.2GB"
+    Label example: "1080p MP4 ~1.2GB"
     """
     formats = info.get("formats") or []
     parsed = []
@@ -152,15 +163,13 @@ def download_video(
     out_dir: str,
     video_format_id: Optional[str] = None,
     audio_only: bool = False,
-    playlist_items: Optional[str] = None,
     progress_hook=None,
 ):
     """
-    Download logic using yt_dlp.
+    Download SINGLE video (not playlist).
     - out_dir: folder path
     - video_format_id: format id (for video); if None use 'best'
     - audio_only: if True, extract audio to MP3 (requires ffmpeg)
-    - playlist_items: a string like "1-3" or "5" to pick playlist items (yt-dlp option)
     progress_hook: optional callable(d) for progress updates
     """
     Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -168,12 +177,21 @@ def download_video(
 
     ydl_opts = {
         "outtmpl": outtmpl,
-        "noplaylist": False if playlist_items else True,
+        "noplaylist": True,  # IMPORTANT: Single video only
         "quiet": True,
         "no_warnings": True,
+        "continuedl": True,
+        "retries": 10,
+        "fragment_retries": 10,
+        # Anti-bot measures
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android_creator"],
+                "player_skip": ["webpage"],
+            }
+        },
     }
-    if playlist_items:
-        ydl_opts["playlist_items"] = playlist_items  # e.g. "1-5" or "3"
+    
     if audio_only:
         # download best audio and convert to mp3 via ffmpeg
         ydl_opts.update({
@@ -187,7 +205,7 @@ def download_video(
             ]
         })
     else:
-        if video_format_id:
+        if video_format_id and video_format_id != "best":
             ydl_opts["format"] = f"{video_format_id}+bestaudio/best"
         else:
             ydl_opts["format"] = "bestvideo+bestaudio/best"

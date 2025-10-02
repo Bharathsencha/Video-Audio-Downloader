@@ -9,10 +9,12 @@ from PySide6.QtGui import QPixmap, QIcon
 from PySide6.QtWidgets import (
     QWidget, QMainWindow, QLabel, QPushButton, QLineEdit, QHBoxLayout,
     QVBoxLayout, QApplication, QRadioButton, QComboBox, QFileDialog,
-    QListWidget, QMessageBox, QGroupBox, QGridLayout, QCheckBox, QInputDialog
+    QListWidget, QMessageBox, QGroupBox, QGridLayout, QCheckBox, QInputDialog,
+    QButtonGroup
 )
 
 import backend
+import playlist
 
 DEFAULT_DOWNLOAD_DIR = str(Path.home() / "Downloads")
 
@@ -35,13 +37,13 @@ class DownloadThread(QThread):
     progress = Signal(str)  # human readable progress
     finished = Signal(bool, object)  # success, error-or-result
 
-    def __init__(self, url, out_dir, video_format_id=None, audio_only=False, playlist_items=None):
+    def __init__(self, url, out_dir, video_format_id=None, audio_only=False, is_playlist=False):
         super().__init__()
         self.url = url
         self.out_dir = out_dir
         self.video_format_id = video_format_id
         self.audio_only = audio_only
-        self.playlist_items = playlist_items
+        self.is_playlist = is_playlist
         self._cancelled = False
 
     def cancel(self):
@@ -56,8 +58,17 @@ class DownloadThread(QThread):
         if status == "downloading":
             percent = d.get("_percent_str", "").strip()
             eta = d.get("_eta_str", "").strip()
-            if percent and eta:
-                self.progress.emit(f"Downloading: {percent} ETA: {eta}")
+            filename = d.get("filename", "")
+            if filename:
+                # Extract just the filename for display
+                filename = os.path.basename(filename)
+                if len(filename) > 40:
+                    filename = filename[:37] + "..."
+            
+            if percent and eta and filename:
+                self.progress.emit(f"Downloading: {filename}\n{percent} ETA: {eta}")
+            elif percent and filename:
+                self.progress.emit(f"Downloading: {filename}\n{percent}")
             elif percent:
                 self.progress.emit(f"Downloading: {percent}")
             else:
@@ -71,14 +82,32 @@ class DownloadThread(QThread):
         try:
             if self._cancelled:
                 return
-            backend.download_video(
-                self.url,
-                self.out_dir,
-                video_format_id=self.video_format_id,
-                audio_only=self.audio_only,
-                playlist_items=self.playlist_items,
-                progress_hook=self.progress_hook
-            )
+            
+            if self.is_playlist:
+                # Use playlist module
+                if self.audio_only:
+                    playlist.download_playlist_audio(
+                        self.url,
+                        self.out_dir,
+                        progress_hook=self.progress_hook
+                    )
+                else:
+                    playlist.download_playlist_video(
+                        self.url,
+                        self.out_dir,
+                        video_format_id=self.video_format_id,
+                        progress_hook=self.progress_hook
+                    )
+            else:
+                # Use backend for single video
+                backend.download_video(
+                    self.url,
+                    self.out_dir,
+                    video_format_id=self.video_format_id,
+                    audio_only=self.audio_only,
+                    progress_hook=self.progress_hook
+                )
+            
             if not self._cancelled:
                 self.finished.emit(True, None)
         except Exception as e:
@@ -88,8 +117,8 @@ class DownloadThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Py YTDLP GUI")
-        self.setMinimumSize(700, 480)
+        self.setWindowTitle("Py YTDLP GUI - Video & Playlist Downloader")
+        self.setMinimumSize(750, 520)
         self._apply_light_theme()
 
         self._build_ui()
@@ -120,6 +149,18 @@ class MainWindow(QMainWindow):
         info_row.addWidget(self.thumbnail_label)
 
         right_info = QVBoxLayout()
+
+        # Download Mode: Single or Playlist
+        mode_box = QGroupBox("Download Mode")
+        mode_layout = QHBoxLayout()
+        self.rb_single = QRadioButton("Single Video")
+        self.rb_playlist = QRadioButton("Playlist")
+        self.rb_single.setChecked(True)
+        self.rb_single.toggled.connect(self.on_mode_changed)
+        mode_layout.addWidget(self.rb_single)
+        mode_layout.addWidget(self.rb_playlist)
+        mode_box.setLayout(mode_layout)
+        right_info.addWidget(mode_box)
 
         # Video / Audio radio
         type_box = QGroupBox("Output")
@@ -159,6 +200,7 @@ class MainWindow(QMainWindow):
         download_buttons.addWidget(self.btn_cancel)
         
         self.progress_label = QLabel("")
+        self.progress_label.setWordWrap(True)
         right_info.addLayout(download_buttons)
         right_info.addWidget(self.progress_label)
 
@@ -190,7 +232,7 @@ class MainWindow(QMainWindow):
         self.current_info = None
         self.current_thumbnail_url = None
         self.playlist_detected = False
-        self.current_play_entries = []  # if playlist, store entries
+        self.is_playlist_url = False
         self._dl_thread = None
 
     # ---------- UI actions ----------
@@ -215,6 +257,10 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Select download folder", self.folder_display.text())
         if folder:
             self.folder_display.setText(folder)
+
+    def on_mode_changed(self):
+        """Called when user switches between Single and Playlist mode"""
+        pass  # Nothing special needed here
 
     def on_type_changed(self):
         # When switching between video and audio, update the quality combo automatically
@@ -261,87 +307,49 @@ class MainWindow(QMainWindow):
             return
 
         self.current_info = info
-        # detect playlist
-        if info.get("_type") == "playlist" or info.get("entries") and info.get("playlist"):
-            # playlist
+        
+        # Check if it's a playlist
+        if info.get("_type") == "playlist" or (info.get("entries") and len(info.get("entries", [])) > 1):
             self.playlist_detected = True
             entries = info.get("entries", [])
-            self.current_play_entries = entries
+            self.progress_label.setText(f"Playlist detected with {len(entries)} videos")
             
-            # Create custom dialog for playlist options
-            playlist_msg = QMessageBox(self)
-            playlist_msg.setWindowTitle("Playlist Detected")
-            playlist_msg.setText(f"Playlist detected with {len(entries)} items.")
-            playlist_msg.setInformativeText("What would you like to do?")
+            # Auto-select playlist mode
+            self.rb_playlist.setChecked(True)
             
-            # Add custom buttons
-            whole_playlist_btn = playlist_msg.addButton("Download Entire Playlist", QMessageBox.YesRole)
-            single_video_btn = playlist_msg.addButton("Download Single Video", QMessageBox.NoRole)
-            cancel_btn = playlist_msg.addButton("Cancel", QMessageBox.RejectRole)
-            
-            playlist_msg.exec()
-            clicked_button = playlist_msg.clickedButton()
-            
-            if clicked_button == cancel_btn:
-                self.progress_label.setText("")
-                return
-            elif clicked_button == whole_playlist_btn:
-                self.progress_label.setText(f"Playlist detected: {len(entries)} items. Will download entire playlist to separate folder.")
-                # We'll create a folder for the playlist in download logic
-            elif clicked_button == single_video_btn:
-                # Ask which video from playlist
-                video_list = []
-                for i, entry in enumerate(entries[:20]):  # Show first 20 items max
-                    title = entry.get("title", f"Video {i+1}")
-                    video_list.append(f"{i+1}. {title}")
-                
-                choice_text = "\n".join(video_list)
-                if len(entries) > 20:
-                    choice_text += f"\n... and {len(entries) - 20} more items"
-                
-                idx, ok = QInputDialog.getInt(
-                    self, 
-                    "Select Video", 
-                    f"Select video number (1-{len(entries)}):\n\n{choice_text[:500]}{'...' if len(choice_text) > 500 else ''}", 
-                    1, 1, len(entries)
-                )
-                if not ok:
-                    self.progress_label.setText("")
-                    return
-                
-                # Get the specific video and fetch its full info
-                selected_entry = entries[idx - 1]
-                vid_url = selected_entry.get("webpage_url") or selected_entry.get("url")
-                if vid_url:
-                    try:
-                        info = backend.fetch_info(vid_url)
-                        self.current_info = info
-                        self.playlist_detected = False
-                        self.current_play_entries = []
-                        self.progress_label.setText(f"Selected video {idx} from playlist")
-                    except Exception:
-                        self.progress_label.setText("Error fetching selected video info")
-                        return
+            # Show playlist thumbnail (from first video)
+            if entries and len(entries) > 0:
+                thumb = entries[0].get("thumbnail")
+                if thumb:
+                    self.current_thumbnail_url = thumb
+                    b = backend.download_thumbnail_to_bytes(thumb)
+                    if b:
+                        pix = QPixmap()
+                        pix.loadFromData(b)
+                        pix = pix.scaled(self.thumbnail_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                        self.thumbnail_label.setPixmap(pix)
+                    else:
+                        self.thumbnail_label.setText("Thumbnail\nnot available")
+                else:
+                    self.thumbnail_label.setText("No thumbnail")
         else:
             self.playlist_detected = False
-            self.current_play_entries = []
-
-        # show thumbnail
-        thumb = self.current_info.get("thumbnail") or (self.current_info.get("entries")[0].get("thumbnail") if self.current_info.get("entries") else None)
-        self.current_thumbnail_url = thumb
-        if thumb:
-            self.progress_label.setText("Downloading thumbnail...")
-            b = backend.download_thumbnail_to_bytes(thumb)
-            if b:
-                pix = QPixmap()
-                pix.loadFromData(b)
-                # scale to label
-                pix = pix.scaled(self.thumbnail_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                self.thumbnail_label.setPixmap(pix)
+            self.rb_single.setChecked(True)
+            
+            # show thumbnail for single video
+            thumb = self.current_info.get("thumbnail")
+            self.current_thumbnail_url = thumb
+            if thumb:
+                b = backend.download_thumbnail_to_bytes(thumb)
+                if b:
+                    pix = QPixmap()
+                    pix.loadFromData(b)
+                    pix = pix.scaled(self.thumbnail_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                    self.thumbnail_label.setPixmap(pix)
+                else:
+                    self.thumbnail_label.setText("Thumbnail\nnot available")
             else:
-                self.thumbnail_label.setText("Thumbnail\nnot available")
-        else:
-            self.thumbnail_label.setText("No thumbnail")
+                self.thumbnail_label.setText("No thumbnail")
 
         # Update quality combo based on current selection
         self.update_quality_combo()
@@ -362,14 +370,28 @@ class MainWindow(QMainWindow):
         
         out_dir = self.folder_display.text().strip() or DEFAULT_DOWNLOAD_DIR
         audio_only = self.rb_audio.isChecked()
+        is_playlist = self.rb_playlist.isChecked()
 
-        # Handle playlist downloads
-        playlist_items = None
-        if self.playlist_detected:
-            # Create a subfolder for the playlist
-            playlist_title = self.current_info.get("title", "Playlist").replace("/", "_").replace("\\", "_")
+        # Handle playlist downloads - create subfolder
+        if is_playlist:
+            playlist_title = self.current_info.get("title", "Playlist")
+            # Clean up title for folder name
+            playlist_title = "".join(c for c in playlist_title if c.isalnum() or c in (' ', '-', '_')).strip()
+            if not playlist_title:
+                playlist_title = "Playlist"
             out_dir = os.path.join(out_dir, playlist_title)
-            playlist_items = None  # Download entire playlist
+            
+            # Confirm with user
+            entries = self.current_info.get("entries", [])
+            msg = f"Download {len(entries)} videos from playlist to:\n{out_dir}"
+            reply = QMessageBox.question(
+                self, 
+                "Confirm Playlist Download", 
+                msg,
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
         
         # Get video format
         fmt_id = None
@@ -390,7 +412,7 @@ class MainWindow(QMainWindow):
             out_dir,
             video_format_id=fmt_id,
             audio_only=audio_only,
-            playlist_items=playlist_items
+            is_playlist=is_playlist
         )
         self._dl_thread.progress.connect(self.on_dl_progress)
         self._dl_thread.finished.connect(self.on_dl_finished)
